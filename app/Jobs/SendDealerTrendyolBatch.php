@@ -85,7 +85,9 @@ class SendDealerTrendyolBatch implements ShouldQueue
                 $this->attributes,
             );
 
-            $sent = (int) ($result['accepted'] ?? 0) + (int) ($result['updated'] ?? 0);
+            // Yeni iletilenler batch doğrulamasında sayılır; burada yalnız
+            // mevcut ilanın fiyat/stoğu tazelendiyse "gönderildi" yazılır.
+            $sent = (int) ($result['updated'] ?? 0);
             $failed = (int) ($result['failed'] ?? 0);
             $errors = array_values(array_slice((array) ($result['errors'] ?? []), 0, 20));
             $batches = array_values((array) ($result['batches'] ?? []));

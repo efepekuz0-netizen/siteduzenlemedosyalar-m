@@ -1,0 +1,61 @@
+# Bayiinet kuyruk işçisi — ETKİLEŞİMLİ işler (queue:work)
+#
+# Kuyruk önceliği: marketplace → default → maintenance
+#   marketplace : Trendyol ürün gönderimi, batch doğrulama, ilan silme
+#   default     : panelden tetiklenen kısa işler
+#   maintenance : ağır arka plan işleri (XML içe aktarma, toplu fiyat) —
+#                 ayrıca bayiinet-maintenance.service bunları öncelikli tüketir
+# Bu sıralama, 10 dakikalık bir XML içe aktarmanın Trendyol gönderimini
+# bloke etmesini engeller (eskiden hepsi 'default' kuyruğundaydı).
+#
+# __PHP__ yer tutucusu, kurulumda sunucudaki gerçek php yolu ile
+değiştirilir (ör. /usr/bin/php8.3). Bazı sunucularda /usr/bin/php yoktur.
+#
+# Bu süreç olmadan: XML içe aktarma, Trendyol ürün gönderimi, fiyat/stok
+# eşitleme ve batch sonuç kontrolü HİÇ İLERLEMEZ (işler jobs tablosunda bekler).
+#
+# Kurulum (install.sh otomatik yapar):
+#   sudo cp deploy/oracle/bayiinet-queue.service /etc/systemd/system/
+#   sudo sed -i 's|__APP_DIR__|/var/www/bayiinet|g; s|__USER__|www-data|g; s|__PHP__|/usr/bin/php8.3|g' /etc/systemd/system/bayiinet-queue.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bayiinet-queue
+#
+# Not: --timeout job zaman aşımından (840 sn) büyük olmalı, kuyruk
+# retry_after (960 sn) değerinden KÜÇÜK olmalıdır; aksi hâlde aynı iş iki
+# işçiye birden düşer. 900 sn bu aralığın ortasıdır.
+
+# __PHP__ yer tutucusu: sunucudaki php çalıştırılabilir dosyası
+# (install.sh bunu otomatik doldurur: /usr/bin/php8.3 veya /usr/bin/php)
+
+[Unit]
+Description=Bayiinet kuyruk işçisi (queue:work)
+After=network.target mysql.service mariadb.service
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=180
+
+WorkingDirectory=__APP_DIR__
+
+# --max-time: işçi bellek sızıntısına karşı düzenli olarak yenilenir (systemd geri başlatır)
+# --tries=3: geçici hatalarda yeniden dener; kalıcı hatalar failed_jobs'a yazılır
+ExecStart=__PHP__ __APP_DIR__/artisan queue:work database \
+    --queue=marketplace,default,maintenance \
+    --sleep=3 \
+    --tries=3 \
+    --timeout=900 \
+    --max-time=3600 \
+    --memory=512 \
+    --rest=1
+
+# Loglar journald'a düşer: journalctl -u bayiinet-queue -f
+StandardOutput=append:__APP_DIR__/storage/logs/queue-worker.log
+StandardError=append:__APP_DIR__/storage/logs/queue-worker.log
+
+[Install]
+WantedBy=multi-user.target

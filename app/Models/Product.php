@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -56,6 +57,26 @@ class Product extends Model
         'attributes' => 'array',
         'last_synced_at' => 'datetime',
     ];
+
+    /**
+     * Gönderilebilecek ürünler: aktif ve stoğu olanlar.
+     *
+     * Tek kaynak: yönetim panelindeki "Tüm ürünleri gönder" sayacı, gönderim
+     * işleri ve XML feed'i aynı ölçütü kullanır (sayılar birbirini tutsun).
+     * Varyantlı üründe toplam varyant stoğu > 0 olmalıdır.
+     */
+    public function scopeSendable(Builder $query): void
+    {
+        $query->where('is_active', true)
+            ->where(function (Builder $group): void {
+                $group->where(function (Builder $plain): void {
+                    $plain->where('has_variants', false)->where('stock', '>', 0);
+                })->orWhere(function (Builder $variants): void {
+                    $variants->where('has_variants', true)
+                        ->whereHas('variants', fn (Builder $inner) => $inner->where('stock', '>', 0));
+                });
+            });
+    }
 
     public function source(): BelongsTo
     {

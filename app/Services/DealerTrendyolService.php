@@ -579,6 +579,180 @@ class DealerTrendyolService
         ];
     }
 
+    /**
+     * Gönderim öncesi kuru çalıştırma (Trendyol'a hiçbir istek gitmez).
+     *
+     * Panelde "neden gönderilmiyor?" sorusunu cevaplar: her kalem için barkod,
+     * fiyat, görsel, kategori ve marka Trendyol'un kabul kurallarına göre
+     * doğrulanır; hata varsa gerekçesi döner. Gerçek gönderim yolu ile aynı
+     * yardımcıları (barcodeFor/salePrice/quantityFor/TrendyolProductPayload)
+     * kullanır, bu yüzden sonuç gönderimi birebir yansıtır.
+     *
+     * @param  array<int, int>  $productIds
+     * @return array{
+     *   total: int,
+     *   ready: int,
+     *   blocked: int,
+     *   adjusted: int,
+     *   items: list<array<string,mixed>>,
+     *   reason_counts: array<string,int>,
+     *   notes: list<string>
+     * }
+     */
+    public function preview(Dealer $dealer, array $productIds, ?int $categoryId = null, ?int $brandId = null, int $limit = 100): array
+    {
+        $margin = $this->dealerMargin($dealer);
+        $fallbackCategory = $this->categoryMatcher->fallbackCategoryId();
+        $fallbackBrand = $brandId && $brandId > 0
+            ? (int) $brandId
+            : ($this->categoryMatcher->fallbackBrandId() ?: (int) config('bayiinet.trendyol.fallback_brand_id', 2613880));
+
+        $products = Product::query()
+            ->with(['variants', 'source'])
+            ->whereIn('id', array_map('intval', $productIds))
+            ->orderBy('id')
+            ->limit(max(1, min($limit, 500)))
+            ->get();
+
+        $items = [];
+        $reasonCounts = [];
+        $notes = [];
+        $ready = 0;
+        $blocked = 0;
+        $adjusted = 0;
+        $autoCategory = 0;
+        $autoBrand = 0;
+
+        foreach ($products as $product) {
+            $sourceCategory = (int) ($product->source?->default_trendyol_category_id ?? 0);
+            $forcedCategory = ($categoryId && $categoryId > 0)
+                ? (int) $categoryId
+                : ($sourceCategory > 0 ? $sourceCategory : 0);
+            $resolvedCategory = $forcedCategory > 0 ? $forcedCategory : $fallbackCategory;
+            $isAutoCategory = $forcedCategory <= 0;
+
+            if ($isAutoCategory) {
+                $autoCategory++;
+            }
+
+            $sourceBrand = (int) ($product->source?->default_trendyol_brand_id ?? 0);
+            $resolvedBrand = $sourceBrand > 0 ? $sourceBrand : $fallbackBrand;
+            if ($sourceBrand <= 0) {
+                $autoBrand++;
+            }
+
+            foreach ($this->entries($product) as $variant) {
+                $label = $this->label($product).($variant !== null ? ' ('.$variant->value.')' : '');
+                $reasons = [];
+                $barcode = $this->barcodeFor($product, $variant);
+                $price = $this->salePrice($product, $variant, $margin);
+                $quantity = $this->quantityFor($product, $variant);
+                $images = (array) ($product->images ?? []);
+
+                if ($barcode === '') {
+                    $reasons[] = 'Barkod/stok kodu boş — Trendyol barkodu üretilemiyor.';
+                }
+                if ($price <= 0) {
+                    $reasons[] = 'Satış fiyatı hesaplanamadı (bayiye satış fiyatı 0). Fiyatları «Kâr & Fiyatlama»dan güncelleyin.';
+                }
+                if ($images === []) {
+                    $reasons[] = 'Ürün görseli yok (XML Image alanı boş) — Trendyol görselsiz ürün kabul etmez.';
+                }
+                if ($resolvedCategory <= 0) {
+                    $reasons[] = 'Trendyol kategori numarası yok: formdan girin veya XML kaynağına varsayılan kategori tanımlayın.';
+                }
+                if ($resolvedBrand <= 0) {
+                    $reasons[] = 'Trendyol marka numarası yok: formdan girin veya XML kaynağına varsayılan marka tanımlayın.';
+                }
+                if (! $product->is_active) {
+                    $reasons[] = 'Ürün pasif (is_active=0) — stok 0 olarak gönderilir.';
+                }
+                if ($quantity <= 0) {
+                    $reasons[] = 'Stok 0 — ürün Trendyol\'a 0 stokla gider (satışa açık kalmaz).';
+                }
+
+                // Trendyol kural doğrulaması: gerçek gönderimde kullanılan payload
+                // üreticisi ile aynı kontroller.
+                if ($barcode !== '' && $price > 0 && $images !== [] && $resolvedCategory > 0 && $resolvedBrand > 0) {
+                    try {
+                        TrendyolProductPayload::item([
+                            'barcode' => $barcode,
+                            'stock_code' => $product->stock_code,
+                            'title' => $this->titleFor($product, $variant),
+                            'description' => $product->description,
+                            'images' => $images,
+                            'quantity' => $quantity,
+                            'sale_price' => $price,
+                            'list_price' => max((float) ($product->list_price ?? 0), $price),
+                            'vat_rate' => $product->tax_rate ?: 20,
+                            'desi' => $product->desi,
+                            'category_id' => $resolvedCategory,
+                            'brand_id' => $resolvedBrand,
+                            'attributes' => [],
+                        ]);
+                    } catch (InvalidArgumentException $e) {
+                        $reasons[] = 'Trendyol kural hatası: '.$e->getMessage();
+                    }
+                }
+
+                $fatal = array_filter($reasons, fn (string $r): bool => ! str_starts_with($r, 'Stok 0')
+                    && ! str_starts_with($r, 'Ürün pasif'));
+
+                if ($fatal === []) {
+                    $ready++;
+                } else {
+                    $blocked++;
+                }
+                if ($reasons !== []) {
+                    $adjusted++;
+                }
+                foreach ($reasons as $reason) {
+                    $key = preg_replace('/\s*\(.*$/s', '', rtrim($reason, '.')) ?? $reason;
+                    $reasonCounts[$key] = ($reasonCounts[$key] ?? 0) + 1;
+                }
+
+                $items[] = [
+                    'product_id' => (int) $product->id,
+                    'title' => (string) $product->title,
+                    'stock_code' => (string) $product->stock_code,
+                    'variant' => $variant !== null ? (string) $variant->value : null,
+                    'label' => $label,
+                    'barcode' => $barcode,
+                    'price' => $price,
+                    'quantity' => $quantity,
+                    'images' => count($images),
+                    'category_id' => $resolvedCategory,
+                    'brand_id' => $resolvedBrand,
+                    'auto_category' => $isAutoCategory,
+                    'auto_brand' => $sourceBrand <= 0,
+                    'ok' => $fatal === [],
+                    'reasons' => $reasons,
+                ];
+            }
+        }
+
+        if ($autoCategory > 0) {
+            $notes[] = $autoCategory.' ürünün Trendyol kategorisi otomatik eşlenecek (Trendyol kategori ağacından). '
+                .'Eşleşme bulunamazsa o ürünler reddedilir; kesin sonuç için XML kaynağına varsayılan kategori no girin.';
+        }
+        if ($autoBrand > 0) {
+            $notes[] = $autoBrand.' ürünün markası XML marka adından çözülecek, bulunamazsa «'
+                .($fallbackBrand > 0 ? $fallbackBrand : 'Diğer').'» markası kullanılacak.';
+        }
+
+        arsort($reasonCounts);
+
+        return [
+            'total' => count($items),
+            'ready' => $ready,
+            'blocked' => $blocked,
+            'adjusted' => $adjusted,
+            'items' => $items,
+            'reason_counts' => $reasonCounts,
+            'notes' => $notes,
+        ];
+    }
+
     private function resolveBrandIds(MarketplaceConnection $connection, iterable $products, ?int $genericBrandId): array
     {
         $names = [];
@@ -1163,39 +1337,11 @@ class DealerTrendyolService
     }
 
     /**
-     * Batch sonucunu birkaç denemede oku.
-     * @param  array<string, int>  $barcodeToListing
-     * @return array{created: int, failed: int, errors: list<string>, pending: bool}
+     * Batch sonucunu birkaç denemede okumak için kullanılan eski yardımcı
+     * kaldırıldı: gönderim artık işçiyi bloke etmiyor, doğrulama tamamen
+     * `VerifyTrendyolBatch` işi + 15 dakikalık zamanlanmış kontrol ile
+     * `applyBatchResult()` üzerinden yapılıyor.
      */
-    private function waitAndApplyBatchResult(
-        Dealer $dealer,
-        MarketplaceConnection $connection,
-        string $batchId,
-        array $barcodeToListing,
-    ): array {
-        // Trendyol sonucu genelde 2-15 sn içinde hazır olur. Uzun süre bloklamak
-        // yerine kısa bir süre bekleyip kalanını VerifyTrendyolBatch'e bırakıyoruz.
-        // Kısa bekleme — uzun poll job'ı kilitler ("attempted too many times").
-        // Asıl doğrulama VerifyTrendyolBatch + recheck ile yapılır.
-        $lastError = '';
-        usleep(1500000); // ~1.5 sn
-
-        try {
-            $result = $this->applyBatchResult($dealer, $connection, $batchId, $barcodeToListing);
-            $result['pending'] = false;
-
-            return $result;
-        } catch (Throwable $e) {
-            $lastError = $e->getMessage();
-        }
-
-        return [
-            'created' => 0,
-            'failed' => 0,
-            'errors' => ['Batch '.$batchId.' henüz hazır değil: '.$lastError.' — arka planda tekrar kontrol edilecek.'],
-            'pending' => true,
-        ];
-    }
 
     private function applyBatchResult(Dealer $dealer, MarketplaceConnection $connection, string $batchId, array $barcodeToListing): array
     {
@@ -1296,6 +1442,9 @@ class DealerTrendyolService
      * cost = bayiye satış fiyatı (dealer cost)
      * S = (landed + kar) / (1 - komisyon), kargo desi+fiyata göre, xx.99 yuvarlama
      * $margin yüzde olarak gelir (örn. 60).
+     *
+     * Komisyon/kâr/yuvarlama ayarları config/bayiinet.php (TRENDYOL_* ortam
+     * değişkenleri) üzerinden gelir; eskiden kod içinde sabitti.
      */
     public function salePrice(Product $product, ?ProductVariant $variant, float $margin): float
     {
@@ -1305,18 +1454,19 @@ class DealerTrendyolService
             return 0.0;
         }
 
-        $desi = (float) ($product->desi ?: 5);
+        $defaultDesi = (float) config('bayiinet.pricing.default_desi', 5);
+        $desi = (float) ($product->desi ?: $defaultDesi);
         if ($desi <= 0) {
-            $desi = 5.0;
+            $desi = $defaultDesi > 0 ? $defaultDesi : 5.0;
         }
 
         // margin yüzde (60) -> calculator 0.60 veya 60 kabul eder
         $calculated = $this->priceCalculator->calculate($base, $desi, [
             'profit_margin' => $margin,
-            'commission_rate' => 0.15,
-            'min_profit' => 10,
-            'round_to' => 0.99,
-            'delivery_type' => 'standart',
+            'commission_rate' => (float) config('bayiinet.pricing.commission_rate', 15),
+            'min_profit' => (float) config('bayiinet.pricing.min_profit', 10),
+            'round_to' => (float) config('bayiinet.pricing.round_to', 0.99),
+            'delivery_type' => (string) config('bayiinet.pricing.delivery_type', 'standart'),
         ]);
 
         if ($calculated === null || $calculated <= 0) {

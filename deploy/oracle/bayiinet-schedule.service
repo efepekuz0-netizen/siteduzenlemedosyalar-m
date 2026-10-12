@@ -1,0 +1,37 @@
+# Bayiinet zamanlayıcı (schedule:work) — saatlik senkron ve batch kontrolü
+#
+# Saatlik XML yenileme, saatlik Trendyol senkronu ve 15 dakikalık batch
+# sonuç kontrolü bu süreçte çalışır. Panelde "Otomasyon" ekranındaki
+# zamanlayıcı nabzı bu servise bağlıdır.
+#
+# Kurulum (install.sh otomatik yapar):
+#   sudo cp deploy/oracle/bayiinet-schedule.service /etc/systemd/system/
+#   sudo sed -i 's|__APP_DIR__|/var/www/bayiinet|g; s|__USER__|www-data|g; s|__PHP__|/usr/bin/php8.3|g' /etc/systemd/system/bayiinet-schedule.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bayiinet-schedule
+#
+# Alternatif (systemd istemezseniz) cron:
+#   * * * * * cd /var/www/bayiinet && /usr/bin/php artisan schedule:run >> /dev/null 2>&1
+
+# __PHP__ yer tutucusu: sunucudaki php çalıştırılabilir dosyası
+# (install.sh bunu otomatik doldurur: /usr/bin/php8.3 veya /usr/bin/php)
+
+[Unit]
+Description=Bayiinet zamanlayıcı (schedule:work)
+After=network.target mysql.service mariadb.service
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+Restart=always
+RestartSec=10
+
+WorkingDirectory=__APP_DIR__
+ExecStart=__PHP__ __APP_DIR__/artisan schedule:work
+
+StandardOutput=append:__APP_DIR__/storage/logs/scheduler.log
+StandardError=append:__APP_DIR__/storage/logs/scheduler.log
+
+[Install]
+WantedBy=multi-user.target

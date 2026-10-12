@@ -28,8 +28,9 @@ class SyncTrendyolCatalog implements ShouldQueue
 
     public function __construct(public int $runId)
     {
-        $this->onConnection('marketplace');
-        $this->onQueue('marketplace');
+        // Saatlik katalog taraması (840 sn) — arka plan kuyruğu.
+        $this->onConnection(config('queue.default', 'database'));
+        $this->onQueue('maintenance');
     }
 
     public function handle(

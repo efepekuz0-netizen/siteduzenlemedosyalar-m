@@ -114,8 +114,28 @@
                     <span class="badge {{ ($heartbeat['scheduler_alive'] ?? false) ? 'text-bg-success' : 'text-bg-warning' }}">{{ ($heartbeat['scheduler_alive'] ?? false) ? 'Çalışıyor' : 'Sinyal yok' }}</span>
                 </div>
                 <div class="d-flex justify-content-between border-bottom py-1">
+                    <span class="text-muted">Kuyruk işçisi (queue:work)</span>
+                    <span class="badge {{ ($queue['worker_alive'] ?? false) ? 'text-bg-success' : 'text-bg-danger' }}">
+                        {{ ($queue['worker_alive'] ?? false) ? 'Çalışıyor' : 'Çalışmıyor' }}
+                    </span>
+                </div>
+                <div class="d-flex justify-content-between border-bottom py-1">
+                    <span class="text-muted">İşçi son nabız</span>
+                    <span class="small">{{ ($queue['worker_last_seen'] ?? null) ? \Illuminate\Support\Carbon::parse($queue['worker_last_seen'])->diffForHumans() : 'hiç' }}</span>
+                </div>
+                <div class="d-flex justify-content-between border-bottom py-1">
                     <span class="text-muted">Kuyruk (bekleyen)</span>
                     <span class="fw-semibold">{{ number_format($queue['pending'] ?? 0) }}</span>
+                </div>
+                <div class="d-flex justify-content-between border-bottom py-1">
+                    <span class="text-muted">En eski bekleyen iş</span>
+                    <span class="small">{{ \App\Services\QueueHealth::humanSeconds($queue['oldest_seconds'] ?? null) }}</span>
+                    @if(($queue['pending_maintenance'] ?? 0) > 0)
+                        <div class="small text-muted mt-1">
+                            Ağır iş kuyruğu (XML / toplu fiyat): <strong>{{ number_format($queue['pending_maintenance']) }}</strong>
+                            — <code>bayiinet-maintenance</code> servisi bunları işler.
+                        </div>
+                    @endif
                 </div>
                 <div class="d-flex justify-content-between py-1">
                     <span class="text-muted">Başarısız iş</span>
@@ -123,6 +143,21 @@
                 </div>
             </div>
         </div>
+
+        @if(! ($queue['worker_alive'] ?? false))
+            <div class="alert alert-danger small">
+                <strong><i class="bi bi-exclamation-octagon me-1"></i>Kuyruk işçisi çalışmıyor.</strong>
+                XML içe aktarma, Trendyol ürün gönderimi ve fiyat/stok eşitleme bu süreç olmadan
+                <em>hiç ilerlemez</em>; işler <code>jobs</code> tablosunda bekler.
+                <div class="mt-2">
+                    Sunucuda: <code>sudo systemctl start bayiinet-queue</code> ·
+                    durum: <code>sudo systemctl status bayiinet-queue</code>
+                </div>
+                @if(!empty($queue['advice']))
+                    <div class="mt-1">{{ $queue['advice'] }}</div>
+                @endif
+            </div>
+        @endif
 
         @if(!empty($heartbeat['jobs']))
             <div class="card mb-3">
@@ -133,11 +168,17 @@
                         <tbody>
                         @foreach($heartbeat['jobs'] as $name => $info)
                             <tr>
-                                <td class="text-break">{{ $name }}</td>
+                                <td class="text-break">{{ $info['label'] ?? $name }}</td>
                                 <td>
-                                    <span class="badge {{ ($info['status'] ?? '') === 'ok' ? 'text-bg-success' : 'text-bg-danger' }}">{{ $info['status'] ?? '-' }}</span>
+                                    @php($st = $info['status'] ?? 'idle')
+                                    <span class="badge {{ $st === 'ok' ? 'text-bg-success' : ($st === 'warning' ? 'text-bg-warning' : ($st === 'error' ? 'text-bg-danger' : 'text-bg-secondary')) }}">{{ $st }}</span>
                                 </td>
-                                <td class="text-muted">{{ $info['at'] ?? $info['last_run_at'] ?? '-' }}</td>
+                                <td class="text-muted">
+                                    {{ !empty($info['ran_at']) ? \Illuminate\Support\Carbon::parse($info['ran_at'])->format('d.m.Y H:i') : 'hiç çalışmadı' }}
+                                    @if(!empty($info['message']))
+                                        <div class="text-muted">{{ \Illuminate\Support\Str::limit($info['message'], 90) }}</div>
+                                    @endif
+                                </td>
                             </tr>
                         @endforeach
                         </tbody>

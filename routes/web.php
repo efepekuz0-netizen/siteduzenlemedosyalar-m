@@ -14,33 +14,15 @@ use App\Http\Controllers\Dealer\DashboardController as DealerDashboardController
 use App\Http\Controllers\Dealer\OrderController as DealerOrderController;
 use App\Http\Controllers\Dealer\ProductController as DealerProductController;
 use App\Http\Controllers\HomeController;
+use App\Http\Controllers\SystemController;
 use App\Http\Controllers\XmlFeedController;
 use Illuminate\Support\Facades\Route;
 
 
 
-Route::get('/health-detail', function () {
-    $out = ['ok' => true, 'php' => PHP_VERSION];
-    try {
-        \Illuminate\Support\Facades\DB::select('select 1');
-        $out['db'] = 'ok';
-    } catch (\Throwable $e) {
-        $out['ok'] = false;
-        $out['db'] = $e->getMessage();
-    }
-    try {
-        $out['sources_cols'] = \Illuminate\Support\Facades\Schema::hasTable('sources')
-            ? \Illuminate\Support\Facades\Schema::getColumnListing('sources')
-            : [];
-    } catch (\Throwable $e) {
-        $out['sources_cols_error'] = $e->getMessage();
-    }
-    return response()->json($out);
-});
-
-Route::get('/ping', function () {
-    return response('ok', 200)->header('Content-Type', 'text/plain');
-});
+// Sistem uç noktaları (Closure DEĞİL — Closure rotalar route:cache'i bozar).
+Route::get('/health-detail', [SystemController::class, 'healthDetail'])->name('system.health');
+Route::get('/ping', [SystemController::class, 'ping'])->name('system.ping');
 
 Route::get('/', [HomeController::class, 'index'])->name('home');
 Route::view('/gizlilik', 'pages.gizlilik')->name('pages.gizlilik');
@@ -100,6 +82,7 @@ Route::middleware(['auth', 'admin'])
         Route::put('/bayiler/{dealer}/trendyol/baglanti', [AdminDealerTrendyolController::class, 'saveConnection'])->name('dealers.trendyol.connection');
         Route::post('/bayiler/{dealer}/trendyol/baglanti-kontrol', [AdminDealerTrendyolController::class, 'test'])->name('dealers.trendyol.test');
         Route::post('/bayiler/{dealer}/trendyol/gonder', [AdminDealerTrendyolController::class, 'send'])->name('dealers.trendyol.send');
+        Route::post('/bayiler/{dealer}/trendyol/kuru-calisma', [AdminDealerTrendyolController::class, 'dryRun'])->name('dealers.trendyol.dry-run');
         Route::post('/bayiler/{dealer}/trendyol/sil', [AdminDealerTrendyolController::class, 'deleteProducts'])->name('dealers.trendyol.delete');
         Route::post('/bayiler/{dealer}/trendyol/durdur', [AdminDealerTrendyolController::class, 'cancelSend'])->name('dealers.trendyol.cancel');
         Route::post('/bayiler/{dealer}/trendyol/kuyruk-sifirla', [AdminDealerTrendyolController::class, 'resetQueue'])->name('dealers.trendyol.reset');
@@ -146,11 +129,7 @@ Route::middleware(['auth', 'admin'])
     });
 
 // Üye (bayi) paneli — bayilikxml tarzı kök yollar, /bayi öneki yok
-Route::middleware('auth')->get('/basvuru-durumu', function () {
-    abort_unless(auth()->user()->isDealer() && auth()->user()->dealer, 404);
-
-    return view('dealer.application', ['dealer' => auth()->user()->dealer]);
-})->name('dealer.application');
+Route::middleware('auth')->get('/basvuru-durumu', [SystemController::class, 'applicationStatus'])->name('dealer.application');
 
 Route::middleware(['auth', 'dealer'])
     ->name('dealer.')

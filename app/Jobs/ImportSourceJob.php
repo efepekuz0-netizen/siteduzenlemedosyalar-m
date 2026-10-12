@@ -40,8 +40,11 @@ class ImportSourceJob implements ShouldQueue, ShouldBeUnique
         public ?int $userId = null,
         public bool $automated = false,
     ) {
+        // Ağır iş: 15.000 ürünlük XML içe aktarma 10 dakikaya kadar sürebilir.
+        // 'maintenance' kuyruğuna alınır ki Trendyol gönderim/doğrulama işleri
+        // (marketplace) ve panel işleri arkasında beklemesin.
         $this->onConnection(config('queue.default', 'database'));
-        $this->onQueue('default');
+        $this->onQueue('maintenance');
     }
 
     public function uniqueId(): string

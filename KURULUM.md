@@ -1,5 +1,10 @@
 # Bayiinet — Render kurulumu
 
+> ⚠ **Oracle Cloud / kendi sunucu (Ubuntu) kullanıyorsanız bu dosya sizi
+> ilgilendirmiyor.** Bu belge Render (Docker) içindir. Kendi sunucu kurulumu,
+> servis mimarisi ve karşılaşılan hataların çözümü için:
+> **[KURULUM-ORACLE.md](KURULUM-ORACLE.md)** ve `deploy/oracle/install.sh`.
+
 ## 1. Dosyaları yükle
 Bu depoyu GitHub'a yükleyin. `vendor/`, `.env` ve `database/*.sqlite` sürüm
  kontrolüne **dahil değildir** (`.gitignore`).
@@ -11,7 +16,7 @@ Render'da **en az iki** servis oluşturun:
 | Servis | Tür | Komut |
 |---|---|---|
 | Web | Web Service (Docker) | `sh docker/start.sh` (Dockerfile varsayılanı) |
-| Worker | Background Worker (Docker) | `php artisan queue:work --queue=default,marketplace --sleep=2 --tries=3 --timeout=900 --memory=512` |
+| Worker | Background Worker (Docker) | `php artisan queue:work --queue=marketplace,default,maintenance --sleep=2 --tries=3 --timeout=900 --memory=512` |
 
 > Web servisi de başlangıçta `queue:work` + `schedule:work` çalıştırır
 > (`docker/start.sh`), ancak **ayrı bir worker servisi** yeniden başlatma ve

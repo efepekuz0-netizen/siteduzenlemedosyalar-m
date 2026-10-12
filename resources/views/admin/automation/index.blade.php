@@ -32,11 +32,17 @@
             </div>
         </div>
         <div class="col-6 col-lg-3">
-            <div class="card stat-card {{ $queue['pending'] > 200 ? 'orange' : 'green' }} p-3 h-100">
-                <div class="text-muted small">Kuyrukta bekleyen iş</div>
-                <div class="fs-5 fw-semibold">{{ number_format($queue['pending'], 0, ',', '.') }}</div>
+            <div class="card stat-card {{ ($queue['worker_alive'] ?? false) ? (($queue['pending'] ?? 0) > 200 ? 'orange' : 'green') : 'red' }} p-3 h-100">
+                <div class="text-muted small">Kuyruk işçisi (queue:work)</div>
+                <div class="fs-5 fw-semibold {{ ($queue['worker_alive'] ?? false) ? 'text-success' : 'text-danger' }}">
+                    <i class="bi {{ ($queue['worker_alive'] ?? false) ? 'bi-check-circle-fill' : 'bi-x-circle-fill' }} me-1"></i>
+                    {{ ($queue['worker_alive'] ?? false) ? 'Çalışıyor' : 'Çalışmıyor' }}
+                </div>
                 <div class="text-muted small mt-1">
-                    Trendyol kuyruğu: {{ number_format($queue['done'], 0, ',', '.') }} · başarısız: {{ number_format($queue['failed'], 0, ',', '.') }}
+                    Bekleyen: {{ number_format($queue['pending'] ?? 0, 0, ',', '.') }}
+                    (marketplace {{ number_format($queue['marketplace'] ?? 0, 0, ',', '.') }})
+                    · başarısız: {{ number_format($queue['failed'] ?? 0, 0, ',', '.') }}
+                    · en eski: {{ \App\Services\QueueHealth::humanSeconds($queue['oldest_seconds'] ?? null) }}
                 </div>
             </div>
         </div>
@@ -62,6 +68,18 @@
             Zamanlayıcıdan son 15 dakikada nabız alınmadı. Saatlik görevlerin çalışması için sunucuda
             <code>php artisan schedule:work</code> (veya cron ile <code>schedule:run</code>) sürecinin ayakta olması
             ve <code>php artisan queue:work</code> işçisinin çalışması gerekir.
+        </div>
+    @endunless
+
+    @unless($queue['worker_alive'] ?? false)
+        <div class="alert alert-danger">
+            <i class="bi bi-exclamation-octagon-fill me-1"></i>
+            <strong>Kuyruk işçisi çalışmıyor.</strong> XML içe aktarma, Trendyol gönderimi ve fiyat/stok eşitleme
+            bu süreç olmadan ilerlemez. Kendi sunucuda (Oracle Cloud/Ubuntu) işçiyi başlatın:
+            <code>sudo systemctl start bayiinet-queue</code> · durum için <code>sudo systemctl status bayiinet-queue</code>
+            @if(!empty($queue['advice']))
+                <div class="mt-1 small">{{ $queue['advice'] }}</div>
+            @endif
         </div>
     @endunless
 

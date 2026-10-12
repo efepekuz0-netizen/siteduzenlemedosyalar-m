@@ -30,8 +30,10 @@ class ApplyBulkXmlMargin implements ShouldQueue
         public ?int $sourceId = null,
         public ?int $userId = null,
     ) {
+        // Ağır iş: tüm katalogda fiyat yeniden hesaplama (100'lük gruplar).
+        // 'maintenance' kuyruğu — Trendyol işlerini bloke etmez.
         $this->onConnection(config('queue.default', 'database'));
-        $this->onQueue('default');
+        $this->onQueue('maintenance');
     }
 
     public function handle(PricingService $pricing): void

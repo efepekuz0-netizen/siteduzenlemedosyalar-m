@@ -33,8 +33,9 @@ class SyncDealerTrendyolInventory implements ShouldQueue
         public int $dealerId,
         public bool $automated = true,
     ) {
+        // Saatlik stok/fiyat eşitlemesi uzun sürer (840 sn) — arka plan kuyruğu.
         $this->onConnection(config('queue.default', 'database'));
-        $this->onQueue('marketplace');
+        $this->onQueue('maintenance');
     }
 
     public function handle(DealerTrendyolService $trendyol): void

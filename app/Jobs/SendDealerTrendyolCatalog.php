@@ -67,10 +67,7 @@ class SendDealerTrendyolCatalog implements ShouldQueue, ShouldBeUnique
 
         try {
             $query = Product::query()
-                ->where('is_active', true)
-                ->where(function ($q) {
-                    $q->where('stock', '>', 0)->orWhere('has_variants', true);
-                })
+                ->sendable()
                 ->orderBy('id');
 
             if (is_array($this->productIds) && $this->productIds !== []) {
