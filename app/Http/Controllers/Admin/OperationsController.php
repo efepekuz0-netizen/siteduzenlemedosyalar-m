@@ -334,10 +334,15 @@ class OperationsController extends Controller
             }
         }
 
+        // Not: `orders.total_amount` bu şemada hiç olmadı (modelden kaldırıldı);
+        // burada beklenen kolon olarak tutulduğu için ekran sürekli yanlış
+        // alarm veriyordu. Beklenen kolonlar gerçek şemayla eşitlendi.
         $expectedColumns = [
             'products' => ['is_active', 'is_featured', 'show_on_homepage', 'has_variants', 'last_synced_at', 'main_category', 'category_path', 'sell_price', 'stock', 'images', 'title', 'stock_code'],
             'product_variants' => ['product_id', 'stock', 'variant_price', 'variant_stock', 'variant_images', 'barcode'],
-            'orders' => ['dealer_id', 'status', 'total_amount'],
+            'orders' => ['dealer_id', 'status', 'total', 'cargo_pdf_path'],
+            'dealers' => ['trendyol_seller_id', 'trendyol_credentials', 'default_marketplace_margin', 'auto_sync_enabled'],
+            'sources' => ['default_trendyol_brand_id', 'default_trendyol_category_id'],
         ];
         $missingColumns = [];
         if ($dbOk) {
@@ -433,7 +438,8 @@ class OperationsController extends Controller
             $tests[] = ['label' => 'Ürün kartı render testi', 'ok' => false, 'detail' => $e->getMessage()];
         }
 
-        // Kuyruk ve zamanlayıcı
+        // Kuyruk ve zamanlayıcı: işçi nabzı dahil (kendi sunucuya geçişte
+        // en sık kırılan yer queue:work sürecinin çalışmamasıdır).
         $queue = ['pending' => 0, 'failed' => 0];
         try {
             if ($tableStatus['jobs'] ?? false) {
@@ -444,6 +450,21 @@ class OperationsController extends Controller
             }
         } catch (\Throwable $e) {
             // kuyruk tablosu okunamazsa sessizce geç
+        }
+
+        try {
+            $queueHealth = \App\Services\QueueHealth::snapshot();
+            $queue['worker_alive'] = $queueHealth['worker_alive'];
+            $queue['worker_last_seen'] = $queueHealth['worker_last_seen'];
+            $queue['oldest_seconds'] = $queueHealth['oldest_seconds'];
+            $queue['stuck'] = $queueHealth['stuck'];
+            $queue['advice'] = $queueHealth['advice'];
+        } catch (\Throwable $e) {
+            $queue['worker_alive'] = false;
+            $queue['worker_last_seen'] = null;
+            $queue['oldest_seconds'] = null;
+            $queue['stuck'] = false;
+            $queue['advice'] = null;
         }
 
         $failedJobs = collect();

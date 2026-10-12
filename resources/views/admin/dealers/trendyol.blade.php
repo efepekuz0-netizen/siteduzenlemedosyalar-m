@@ -6,6 +6,105 @@
         <strong>Marka / kategori:</strong> XML kaynağında varsayılan Marka No tanımlayın (Kaynaklar → düzenle). Formdaki alanlar opsiyonel; boşsa XML markası + otomatik kategori kullanılır. Takılırsa <em>Kuyruğu sıfırla</em>.
     </div>
 
+    {{-- Kuyruk işçisi: kendi sunucuda (Oracle Cloud/Ubuntu) çalışmıyorsa
+         gönderim kuyruğa girer ama hiç işlenmez. --}}
+    @unless($queue['worker_alive'] ?? true)
+        <div class="alert alert-danger">
+            <strong><i class="bi bi-octagon-fill me-1"></i>Kuyruk işçisi çalışmıyor — gönderim başlatılamaz.</strong>
+            <div class="small mt-1">
+                İşler kuyruğa yazılır ama <code>queue:work</code> süreci olmadığı için işlenmez.
+                Sunucuda: <code>sudo systemctl start bayiinet-queue</code>
+                @if(!empty($queue['advice'])) · {{ $queue['advice'] }} @endif
+            </div>
+        </div>
+    @endunless
+
+    <div class="card mb-3">
+        <div class="card-header bg-white fw-semibold d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <span><i class="bi bi-clipboard-check me-1"></i>Gönderim öncesi kontrol</span>
+            <span class="small text-muted">
+                Kuyruk: {{ number_format($queue['pending'] ?? 0) }} bekleyen
+                · işçi: {{ ($queue['worker_alive'] ?? false) ? 'çalışıyor' : 'çalışmıyor' }}
+                · en eski bekleyen: {{ \App\Services\QueueHealth::humanSeconds($queue['oldest_seconds'] ?? null) }}
+            </span>
+        </div>
+        <div class="card-body">
+            <div class="d-flex flex-wrap gap-2 mb-2">
+                <span class="badge text-bg-light border">Gönderilebilir ürün: {{ number_format($readiness['total'] ?? 0) }}</span>
+                <span class="badge {{ ($readiness['missing_image'] ?? 0) > 0 ? 'text-bg-danger' : 'text-bg-success' }}">Görselsiz: {{ number_format($readiness['missing_image'] ?? 0) }}</span>
+                <span class="badge {{ ($readiness['missing_barcode'] ?? 0) > 0 ? 'text-bg-warning' : 'text-bg-success' }}">Barkodsuz: {{ number_format($readiness['missing_barcode'] ?? 0) }}</span>
+                <span class="badge {{ ($readiness['missing_price'] ?? 0) > 0 ? 'text-bg-warning' : 'text-bg-success' }}">Fiyatsız: {{ number_format($readiness['missing_price'] ?? 0) }}</span>
+                <span class="badge text-bg-info">Trendyol'da oluşan: {{ number_format($readiness['already_created'] ?? 0) }}</span>
+                <span class="badge text-bg-success">Gönderime tam hazır: {{ number_format($readiness['ready_total'] ?? 0) }}</span>
+            </div>
+            @if(($readiness['missing_image'] ?? 0) > 0 || ($readiness['missing_barcode'] ?? 0) > 0 || ($readiness['missing_price'] ?? 0) > 0)
+                <div class="alert alert-warning small mb-2">
+                    <strong>Bu ürünler Trendyol'a gönderilemez:</strong>
+                    görselsiz ürünleri Trendyol reddeder; barkodsuz ürün için barkod üretilemez; fiyatı 0 olan ürün hesaplanamaz.
+                    Kaynağı (XML) düzeltip yeniden içe aktarın veya ürünü <em>Ürünler</em> ekranından düzenleyin.
+                </div>
+            @endif
+            <div class="small text-muted">
+                Aşağıdaki ürün listesinden seçim yapıp <em>«Seçilenleri kontrol et (kuru)»</em> düğmesine basın:
+                Trendyol'a <u>hiç istek gitmeden</u> her kalemin barkod/fiyat/görsel/kategori/marka durumu ve
+                engellenme gerekçesi listelenir.
+            </div>
+        </div>
+    </div>
+
+    @if(!empty($staleVerification))
+        <div class="alert alert-warning small">
+            <strong>{{ $staleVerification }} kalem 30 dakikadan uzun süredir doğrulama bekliyor.</strong>
+            Aşağıdaki <em>«Gönderildi olanları kontrol et»</em> düğmesine basarak Trendyol'dan gerçek sonucu çekin.
+        </div>
+    @endif
+
+    @php($dryRun = session('dryRun'))
+    @if(is_array($dryRun))
+        <div class="card border-{{ ($dryRun['blocked'] ?? 0) > 0 ? 'danger' : 'success' }} mb-3">
+            <div class="card-header bg-white fw-semibold">
+                Kuru çalıştırma sonucu · {{ $dryRun['ready'] ?? 0 }} hazır / {{ $dryRun['blocked'] ?? 0 }} engelli / {{ $dryRun['total'] ?? 0 }} kalem
+            </div>
+            <div class="card-body">
+                @if(!empty($dryRun['reason_counts']))
+                    <div class="mb-2">
+                        @foreach(array_slice($dryRun['reason_counts'], 0, 6, true) as $reason => $count)
+                            <span class="badge text-bg-light border mb-1">{{ $count }}× {{ \Illuminate\Support\Str::limit($reason, 90) }}</span>
+                        @endforeach
+                    </div>
+                @endif
+                @foreach(($dryRun['notes'] ?? []) as $note)
+                    <div class="small text-muted mb-1"><i class="bi bi-info-circle me-1"></i>{{ $note }}</div>
+                @endforeach
+                <div class="table-responsive" style="max-height:340px;overflow:auto">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead class="table-light">
+                            <tr><th>Ürün</th><th>Barkod</th><th class="text-end">Fiyat</th><th class="text-end">Stok</th><th>Durum</th><th>Gerekçe</th></tr>
+                        </thead>
+                        <tbody>
+                        @foreach(($dryRun['items'] ?? []) as $row)
+                            <tr>
+                                <td class="small">{{ \Illuminate\Support\Str::limit($row['label'], 55) }}</td>
+                                <td><code class="small">{{ $row['barcode'] ?: '-' }}</code></td>
+                                <td class="text-end small">{{ number_format((float) $row['price'], 2, ',', '.') }} ₺</td>
+                                <td class="text-end small">{{ $row['quantity'] }}</td>
+                                <td>
+                                    @if($row['ok'])
+                                        <span class="badge text-bg-success">Hazır</span>
+                                    @else
+                                        <span class="badge text-bg-danger">Engelli</span>
+                                    @endif
+                                </td>
+                                <td class="small text-muted">{{ implode(' | ', $row['reasons']) }}</td>
+                            </tr>
+                        @endforeach
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    @endif
+
 @if(!empty($sendStatus) && ($sendStatus['status'] ?? 'idle') !== 'idle')
     @php
         $st = $sendStatus['status'] ?? 'idle';
@@ -298,7 +397,11 @@
                 <div>{{ $products->links() }}</div>
                 <div class="d-flex flex-wrap gap-2">
                     <button type="button" class="btn btn-outline-secondary btn-sm" onclick="document.querySelectorAll('.pick').forEach(c=>c.checked=true)">Bu sayfadakileri seç</button>
+                    <button type="submit" formaction="{{ route('admin.dealers.trendyol.dry-run', $dealer) }}" class="btn btn-outline-dark"
+                            name="send_all" value="0">Seçilenleri kontrol et (kuru)</button>
                     <button type="submit" class="btn btn-primary" @disabled(! $dealer->hasTrendyolCredentials()) name="send_all" value="0">Seçilenleri gönder</button>
+                    <button type="submit" formaction="{{ route('admin.dealers.trendyol.dry-run', $dealer) }}" class="btn btn-outline-dark"
+                            name="send_all" value="1">Tümünü kuru çalıştır (ilk 100)</button>
                     <button type="submit" class="btn btn-success"
                             @disabled(! $dealer->hasTrendyolCredentials())
                             name="send_all" value="1"
@@ -338,4 +441,60 @@
         </table>
     </div>
 </div>
+
+@if(!empty($sendStatus['batches']) && is_array($sendStatus['batches']))
+    <div class="card mb-4">
+        <div class="card-header bg-white fw-semibold">Batch (gönderim paketi) sonuçları</div>
+        <div class="table-responsive">
+            <table class="table table-sm mb-0 align-middle">
+                <thead><tr><th>Batch numarası</th><th class="text-end">Kalem</th><th class="text-end">Oluşan</th><th class="text-end">Hatalı</th><th class="text-end">Bekleyen</th></tr></thead>
+                <tbody>
+                @foreach($sendStatus['batches'] as $batchId => $info)
+                    @php($size = (int) ($info['size'] ?? 0))
+                    @php($created = (int) ($info['created'] ?? 0))
+                    @php($failedCount = (int) ($info['failed'] ?? 0))
+                    <tr>
+                        <td><code class="small">{{ $batchId }}</code></td>
+                        <td class="text-end">{{ $size }}</td>
+                        <td class="text-end text-success">{{ $created }}</td>
+                        <td class="text-end {{ $failedCount > 0 ? 'text-danger' : '' }}">{{ $failedCount }}</td>
+                        <td class="text-end text-muted">{{ max(0, $size - $created - $failedCount) }}</td>
+                    </tr>
+                @endforeach
+                </tbody>
+            </table>
+        </div>
+        <div class="card-body py-2 small text-muted">
+            Bekleyen kalemler Trendyol sonucu geldikçe otomatik güncellenir (15 dakikalık kontrol).
+            Tek bir paketi elle sorgulamak için yukarıdaki <em>«Sonuç sorgula»</em> listesini kullanın.
+        </div>
+    </div>
+@endif
+
+@if(($problematic ?? collect())->isNotEmpty())
+    <div class="card border-danger mb-4">
+        <div class="card-header bg-white fw-semibold text-danger">
+            Trendyol'a gönderilemeyen / reddedilen kalemler ({{ $problematic->count() }})
+        </div>
+        <div class="table-responsive">
+            <table class="table table-sm mb-0 align-middle">
+                <thead><tr><th>Ürün</th><th>Barkod</th><th>Durum</th><th>Trendyol gerekçesi</th></tr></thead>
+                <tbody>
+                @foreach($problematic as $l)
+                    <tr>
+                        <td class="small">{{ $l->product->title ?? '-' }}</td>
+                        <td><code class="small">{{ $l->barcode }}</code></td>
+                        <td><span class="badge text-bg-danger">{{ $statusLabels[$l->status] ?? $l->status }}</span></td>
+                        <td class="small text-break">{{ \Illuminate\Support\Str::limit((string) $l->error, 220) }}</td>
+                    </tr>
+                @endforeach
+                </tbody>
+            </table>
+        </div>
+        <div class="card-body py-2 small text-muted">
+            Gerekçeler Trendyol'un batch yanıtından gelir (zorunlu özellik eksik, fiyat/stok kuralı, görsel hatası vb.).
+            Düzeltip aynı ürünü yeniden gönderin; gönderilemeyenler bir sonraki gönderimde tekrar denenir.
+        </div>
+    </div>
+@endif
 @endsection

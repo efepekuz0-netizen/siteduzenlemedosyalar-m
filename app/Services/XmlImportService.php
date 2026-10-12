@@ -398,9 +398,16 @@ class XmlImportService
         $products = [];
 
         foreach ($batch as $stockCode => $product) {
+            // JSON_THROW_ON_ERROR tek başına kullanılırsa bozuk UTF-8 içeren
+            // (Türkçe tedarikçi XML'lerinde sık görülür) tek bir görsel URL'i
+            // tüm partiyi düşürüyordu: "Malformed UTF-8 characters".
+            // JSON_INVALID_UTF8_SUBSTITUTE bozuk baytları değiştirip devam eder.
             $products[] = [
                 ...$product['data'],
-                'images' => json_encode($product['data']['images'], JSON_THROW_ON_ERROR),
+                'images' => json_encode(
+                    $product['data']['images'],
+                    JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE
+                ),
                 'created_at' => $now,
                 'updated_at' => $now,
             ];

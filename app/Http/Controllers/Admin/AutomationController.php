@@ -93,20 +93,41 @@ class AutomationController extends Controller
     }
 
     /**
-     * @return array{pending: int, failed: int, done: int}
+     * Kuyruk durumu.
+     *
+     * Not: Eskiden `done` alanı `jobs` tablosunda queue='marketplace' olan
+     * kayıtları sayıyordu — bu "biten iş" değil, hâlâ BEKLEYEN Trendyol
+     * işiydi ve ekranda "Trendyol kuyruğu" gibi bitmiş iş sayısı olarak
+     * gösteriliyordu. Artık alanlar gerçek anlamlarıyla dönüyor.
+     *
+     * @return array{pending: int, marketplace: int, failed: int, worker_alive: bool, worker_last_seen: ?string, oldest_seconds: ?int, stuck: bool, advice: ?string}
      */
     private function queueStats(): array
     {
         try {
-            $pending = (int) DB::table('jobs')->count();
-            $failed = (int) DB::table('failed_jobs')->count();
-            $done = (int) DB::table('jobs')
-                ->where('queue', 'marketplace')
-                ->count();
-        } catch (\Throwable) {
-            return ['pending' => 0, 'failed' => 0, 'done' => 0];
-        }
+            $snapshot = \App\Services\QueueHealth::snapshot();
 
-        return ['pending' => $pending, 'failed' => $failed, 'done' => $done];
+            return [
+                'pending' => $snapshot['pending'],
+                'marketplace' => $snapshot['pending_marketplace'],
+                'failed' => $snapshot['failed'],
+                'worker_alive' => $snapshot['worker_alive'],
+                'worker_last_seen' => $snapshot['worker_last_seen'],
+                'oldest_seconds' => $snapshot['oldest_seconds'],
+                'stuck' => $snapshot['stuck'],
+                'advice' => $snapshot['advice'],
+            ];
+        } catch (\Throwable) {
+            return [
+                'pending' => 0,
+                'marketplace' => 0,
+                'failed' => 0,
+                'worker_alive' => false,
+                'worker_last_seen' => null,
+                'oldest_seconds' => null,
+                'stuck' => false,
+                'advice' => null,
+            ];
+        }
     }
 }

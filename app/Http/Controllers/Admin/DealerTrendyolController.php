@@ -3,18 +3,22 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
-use App\Models\Dealer;
-use App\Models\Product;
 use App\Jobs\DeleteDealerTrendyolProducts;
 use App\Jobs\SendDealerTrendyolCatalog;
+use App\Jobs\SendDealerTrendyolRun;
+use App\Models\Dealer;
+use App\Models\Product;
 use App\Models\Source;
-use App\Services\DealerTrendyolService;
 use App\Services\AdminAudit;
-use App\Services\TrendyolSendProgress;
-use Illuminate\Support\Facades\Cache;
+use App\Services\DealerTrendyolService;
+use App\Services\ProductReadiness;
+use App\Services\QueueHealth;
 use App\Services\TrendyolCategoryMatcher;
+use App\Services\TrendyolSendProgress;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use LogicException;
 use Throwable;
 
@@ -55,6 +59,12 @@ class DealerTrendyolController extends Controller
             ->latest('updated_at')
             ->take(50)
             ->get();
+        $problematic = $dealer->trendyolListings()
+            ->with('product:id,title,stock_code')
+            ->where('status', 'failed')
+            ->latest('updated_at')
+            ->take(30)
+            ->get();
         $batches = $dealer->trendyolListings()
             ->whereNotNull('batch_request_id')
             ->latest('sent_at')
@@ -62,7 +72,7 @@ class DealerTrendyolController extends Controller
             ->unique()
             ->take(10);
 
-        $catMap = app(\App\Services\TrendyolCategoryMatcher::class)->map();
+        $catMap = app(TrendyolCategoryMatcher::class)->map();
         $defaultCategoryId = (int) ($catMap['fallback_id'] ?? 0) ?: old('category_id');
         $defaultBrandId = (int) ($catMap['fallback_brand_id'] ?? 0) ?: old('brand_id');
 
@@ -70,9 +80,21 @@ class DealerTrendyolController extends Controller
         $deleteStatus = Cache::get('trendyol_delete_status_'.$dealer->id);
         $sources = Source::query()->orderBy('name')->get(['id', 'name']);
 
+        // Panel kontrolleri: kuyruk işçisi yaşıyor mu, hangi batch'ler
+        // sonuç bekliyor, ürünler gönderime hazır mı?
+        $queue = QueueHealth::snapshot();
+        $readiness = ProductReadiness::counts();
+        $readiness['already_created'] = (int) ($counts['created'] ?? 0);
+        $readiness['ready_total'] = max(0, $readiness['total'] - $readiness['missing_image'] - $readiness['missing_barcode'] - $readiness['missing_price']);
+        $staleVerification = $dealer->trendyolListings()
+            ->where('status', 'sent')
+            ->where('sent_at', '<', now()->subMinutes(30))
+            ->count();
+
         return view('admin.dealers.trendyol', compact(
-            'dealer', 'products', 'prices', 'margin', 'listed', 'counts', 'recent', 'batches', 'search',
+            'dealer', 'products', 'prices', 'margin', 'listed', 'counts', 'recent', 'problematic', 'batches', 'search',
             'defaultCategoryId', 'defaultBrandId', 'sendStatus', 'deleteStatus', 'sources',
+            'queue', 'readiness', 'staleVerification',
         ));
     }
 
@@ -108,6 +130,50 @@ class DealerTrendyolController extends Controller
         return $this->runTest($dealer, 'Trendyol bağlantısı başarılı.');
     }
 
+    /**
+     * Kuru çalıştırma: seçilen ürünler için Trendyol'a HİÇBİR istek gitmeden
+     * barkod/fiyat/görsel/kategori/marka doğrulaması yapılır ve eksikler
+     * gerekçeleriyle listelenir.
+     */
+    public function dryRun(Request $request, Dealer $dealer): RedirectResponse
+    {
+        $data = $request->validate([
+            'product_ids' => 'nullable|array',
+            'product_ids.*' => 'integer|exists:products,id',
+            'send_all' => 'nullable|boolean',
+            'category_id' => 'nullable|integer|min:1',
+            'brand_id' => 'nullable|integer|min:1',
+        ]);
+
+        if ($request->boolean('send_all')) {
+            $ids = Product::query()->sendable()->orderBy('id')->limit(500)->pluck('id')->all();
+        } else {
+            $ids = array_map('intval', $data['product_ids'] ?? []);
+        }
+
+        if ($ids === []) {
+            return $this->back($dealer)->with('error', 'Kontrol için ürün seçin veya «Tüm ürünleri gönder» seçeneğini kullanın.');
+        }
+
+        $result = $this->trendyol->preview(
+            $dealer,
+            $ids,
+            (int) ($data['category_id'] ?? 0) ?: null,
+            (int) ($data['brand_id'] ?? 0) ?: null,
+            100,
+        );
+
+        session()->flash('dryRun', $result);
+
+        $message = sprintf(
+            'Kuru çalıştırma: %d kalem incelendi · %d gönderime hazır · %d engelli.',
+            $result['total'],
+            $result['ready'],
+            $result['blocked'],
+        );
+
+        return $this->back($dealer)->with($result['blocked'] > 0 ? 'error' : 'success', $message);
+    }
 
     public function send(Request $request, Dealer $dealer, TrendyolCategoryMatcher $matcher): RedirectResponse
     {
@@ -129,17 +195,7 @@ class DealerTrendyolController extends Controller
         if ($sendAll) {
             // Limitsiz — job tüm stoklu aktif ürünleri alır
             $productIds = null;
-            $countHint = Product::query()
-                ->where('is_active', true)
-                ->where(function ($q) {
-                    $q->where(function ($plain) {
-                        $plain->where('has_variants', false)->where('stock', '>', 0);
-                    })->orWhere(function ($v) {
-                        $v->where('has_variants', true)
-                            ->whereHas('variants', fn ($s) => $s->where('stock', '>', 0));
-                    });
-                })
-                ->count();
+            $countHint = Product::query()->sendable()->count();
             if ($countHint === 0) {
                 return $this->back($dealer)->with('error', 'Gönderilecek stoklu ürün yok.');
             }
@@ -174,6 +230,18 @@ class DealerTrendyolController extends Controller
             return $this->back($dealer)->with('error', 'Önce Trendyol API bilgilerini kaydedin.');
         }
 
+        // Kuyruk işçisi çalışmıyorsa gönderim başlatmak kullanıcıyı yanıltır:
+        // işler jobs tablosunda bekler ve hiçbir şey olmaz.
+        $queue = QueueHealth::snapshot();
+        if (! $queue['worker_alive'] && ! config('bayiinet.queue.inline_drain')) {
+            return $this->back($dealer)->with(
+                'error',
+                'Kuyruk işçisi (queue:work) çalışmıyor — gönderim başlatılsa da işlenmez. '
+                .'Sunucuda `sudo systemctl start bayiinet-queue` komutunu çalıştırıp tekrar deneyin. '
+                .'Durumu «Sistem Sağlığı» ekranından izleyebilirsiniz.'
+            );
+        }
+
         if (TrendyolSendProgress::isActive($dealer->id)) {
             return $this->back($dealer)->with(
                 'error',
@@ -185,20 +253,20 @@ class DealerTrendyolController extends Controller
         try {
             Cache::lock('laravel_unique_job:trendyol-send-'.$dealer->id)->forceRelease();
             Cache::lock('laravel_unique_job:trendyol-run-'.$dealer->id)->forceRelease();
-        } catch (\Throwable) {
+        } catch (Throwable) {
         }
 
         // Sayfa anında dönsün — gönderim kuyrukta
         TrendyolSendProgress::queued($dealer->id, $countHint.' ürün kuyruğa alındı…');
 
         // Marka formda veya herhangi bir XML kaynağında tanımlıysa masaüstü hızı (100'lük paket, tek iş)
-        $hasBrand = $brandId > 0 || \App\Models\Source::query()
+        $hasBrand = $brandId > 0 || Source::query()
             ->whereNotNull('default_trendyol_brand_id')
             ->where('default_trendyol_brand_id', '>', 0)
             ->exists();
 
         if ($hasBrand) {
-            \App\Jobs\SendDealerTrendyolRun::dispatch(
+            SendDealerTrendyolRun::dispatch(
                 $dealer->id,
                 $sendAll ? null : $productIds,
                 $categoryId > 0 ? $categoryId : null,
@@ -207,7 +275,7 @@ class DealerTrendyolController extends Controller
             );
             $mode = 'masaustu hiz (100 urun/paket)';
         } else {
-            \App\Jobs\SendDealerTrendyolCatalog::dispatch(
+            SendDealerTrendyolCatalog::dispatch(
                 $dealer->id,
                 $sendAll ? null : $productIds,
                 $categoryId > 0 ? $categoryId : null,
@@ -218,23 +286,28 @@ class DealerTrendyolController extends Controller
             $mode = 'guvenli mod (5 urun/paket) — XML kaynagina Marka No ekleyerek hizlanir';
         }
 
-        // Yanıt sonrası kuyruk tüket (Render worker ölürse bile ilk paketler işlensin)
-        dispatch(function () {
-            try {
-                for ($i = 0; $i < 3; $i++) {
-                    \Illuminate\Support\Facades\Artisan::call('queue:work', [
-                        'connection' => 'database',
-                        '--queue' => 'marketplace',
-                        '--once' => true,
-                        '--tries' => 1,
-                        '--timeout' => 120,
-                        '--memory' => 384,
-                    ]);
+        // Render'daki "işçi yok" hilesi: yalnızca QUEUE_INLINE_DRAIN=true ise
+        // (ayrı worker servisi olmayan ortamlar) web isteği içinde kuyruk tüketilir.
+        // Kendi sunucuda gerçek systemd işçisi çalıştığı için varsayılan kapalı.
+        if (config('bayiinet.queue.inline_drain')) {
+            dispatch(function () {
+                try {
+                    $loops = max(1, (int) config('bayiinet.queue.inline_drain_loops', 3));
+                    for ($i = 0; $i < $loops; $i++) {
+                        \Illuminate\Support\Facades\Artisan::call('queue:work', [
+                            'connection' => 'database',
+                            '--queue' => 'marketplace',
+                            '--once' => true,
+                            '--tries' => 1,
+                            '--timeout' => 120,
+                            '--memory' => 384,
+                        ]);
+                    }
+                } catch (Throwable $e) {
+                    \Illuminate\Support\Facades\Log::warning('trendyol afterResponse drain', ['e' => $e->getMessage()]);
                 }
-            } catch (\Throwable $e) {
-                \Illuminate\Support\Facades\Log::warning('trendyol afterResponse drain', ['e' => $e->getMessage()]);
-            }
-        })->afterResponse();
+            })->afterResponse();
+        }
 
         $n = $sendAll ? 'tum stoklu urunler' : (count($productIds).' urun');
 
@@ -253,14 +326,10 @@ class DealerTrendyolController extends Controller
         );
     }
 
-
-
     public function cancelSend(Dealer $dealer): RedirectResponse
     {
         // Kuyruktaki batch işleri durumu her adımda kontrol eder; iptal bayrağını
         // gördüklerinde Trendyol'a hiç dokunmadan kendilerini atlarlar.
-        // (Eskiden marketplace kuyruğu toptan siliniyordu; diğer bayilerin
-        // bekleyen işleri de kayboluyordu.)
         TrendyolSendProgress::cancel(
             $dealer->id,
             'Gönderim durduruldu. Kuyruktaki işler atlanıyor; yeni gönderim başlatabilirsiniz.'
@@ -270,7 +339,7 @@ class DealerTrendyolController extends Controller
         try {
             Cache::lock('laravel_unique_job:trendyol-send-'.$dealer->id)->forceRelease();
             Cache::lock('laravel_unique_job:trendyol-run-'.$dealer->id)->forceRelease();
-        } catch (\Throwable) {
+        } catch (Throwable) {
         }
 
         return $this->back($dealer)->with('success', 'Trendyol gönderimi durduruldu. Kuyrukta bekleyen işler atlanacak.');
@@ -319,15 +388,15 @@ class DealerTrendyolController extends Controller
         return $this->back($dealer)->with('success', $label.' Trendyol silme kuyruğuna alındı.');
     }
 
-
     public function recheckBatches(Dealer $dealer): RedirectResponse
     {
         try {
             $result = $this->trendyol->recheckSentBatches($dealer);
-        } catch (\LogicException $e) {
+        } catch (LogicException $e) {
             return $this->back($dealer)->with('error', $e->getMessage());
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             report($e);
+
             return $this->back($dealer)->with('error', 'Kontrol başarısız: '.$e->getMessage());
         }
 
@@ -396,13 +465,12 @@ class DealerTrendyolController extends Controller
         return redirect()->route('admin.dealers.trendyol', $dealer);
     }
 
-
     public function hepsiburada(Dealer $dealer)
     {
         return view('admin.dealers.hepsiburada', compact('dealer'));
     }
 
-    public function saveHepsiburada(\Illuminate\Http\Request $request, Dealer $dealer): \Illuminate\Http\RedirectResponse
+    public function saveHepsiburada(Request $request, Dealer $dealer): RedirectResponse
     {
         $data = $request->validate([
             'hepsiburada_merchant_id' => 'required|string|max:50',
@@ -426,41 +494,96 @@ class DealerTrendyolController extends Controller
 
         try {
             app(\App\Services\HepsiburadaMarketplaceService::class)->testConnection($dealer->fresh());
+
             return back()->with('success', 'Hepsiburada bağlantısı kaydedildi ve test başarılı.');
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             $dealer->update(['hepsiburada_last_error' => $e->getMessage()]);
+
             return back()->with('error', 'Kaydedildi ama test başarısız: '.$e->getMessage());
         }
     }
 
-    public function testHepsiburada(Dealer $dealer): \Illuminate\Http\RedirectResponse
+    public function testHepsiburada(Dealer $dealer): RedirectResponse
     {
         try {
             app(\App\Services\HepsiburadaMarketplaceService::class)->testConnection($dealer);
             $dealer->update(['hepsiburada_last_error' => null]);
+
             return back()->with('success', 'Hepsiburada bağlantısı başarılı.');
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             $dealer->update(['hepsiburada_last_error' => $e->getMessage()]);
+
             return back()->with('error', $e->getMessage());
         }
     }
 
-    public function resetQueue(Dealer $dealer): \Illuminate\Http\RedirectResponse
+    /**
+     * Bu bayinin Trendyol ile ilgili bekleyen/başarısız işlerini temizler.
+     *
+     * Eskiden `jobs` tablosunun tamamı siliniyordu: diğer bayilerin ve XML
+     * içe aktarmaların işleri de kayboluyordu. Artık yalnızca bu bayinin
+     * Trendyol işleri (payload içindeki dealerId) silinir.
+     */
+    public function resetQueue(Dealer $dealer): RedirectResponse
     {
-        \App\Services\TrendyolSendProgress::cancel($dealer->id, 'Kuyruk sıfırlandı.');
+        TrendyolSendProgress::cancel($dealer->id, 'Kuyruk sıfırlandı.');
+
         try {
-            \Illuminate\Support\Facades\Cache::lock('laravel_unique_job:trendyol-send-'.$dealer->id)->forceRelease();
+            Cache::lock('laravel_unique_job:trendyol-send-'.$dealer->id)->forceRelease();
             Cache::lock('laravel_unique_job:trendyol-run-'.$dealer->id)->forceRelease();
-        } catch (\Throwable) {
+        } catch (Throwable) {
         }
+
         try {
-            \Illuminate\Support\Facades\DB::table('jobs')->where('queue', 'marketplace')->delete();
-            \Illuminate\Support\Facades\DB::table('failed_jobs')->delete();
-        } catch (\Throwable $e) {
+            $deleted = $this->deleteDealerScopedJobs($dealer->id);
+        } catch (Throwable $e) {
             return back()->with('error', 'Kuyruk temizlenemedi: '.$e->getMessage());
         }
 
-        return back()->with('success', 'Trendyol kuyruğu ve başarısız işler temizlendi. Yeni gönderim başlatabilirsiniz.');
+        return back()->with('success', 'Bu bayinin Trendyol kuyruğu temizlendi ('.$deleted.' iş). Diğer bayilerin işleri korundu. Yeni gönderim başlatabilirsiniz.');
     }
 
+    /** Payload içindeki dealerId'ye göre yalnız bu bayinin Trendyol işlerini siler. */
+    private function deleteDealerScopedJobs(int $dealerId): int
+    {
+        $deleted = 0;
+        $needle = 'dealerId";i:'.$dealerId.';';
+
+        foreach (['jobs', 'failed_jobs'] as $table) {
+            try {
+                if (! DB::getSchemaBuilder()->hasTable($table)) {
+                    continue;
+                }
+            } catch (Throwable) {
+                continue;
+            }
+
+            DB::table($table)
+                ->where('queue', 'marketplace')
+                ->orderBy('id')
+                ->chunkById(500, function ($rows) use (&$deleted, $table, $needle): void {
+                    $ids = [];
+                    foreach ($rows as $row) {
+                        $payload = json_decode((string) ($row->payload ?? ''), true);
+                        if (! is_array($payload)) {
+                            continue;
+                        }
+                        $display = (string) ($payload['displayName'] ?? ($payload['data']['commandName'] ?? ''));
+                        if (! str_contains($display, 'Trendyol')) {
+                            continue;
+                        }
+                        $command = (string) ($payload['data']['command'] ?? '');
+                        if ($command !== '' && str_contains($command, $needle)) {
+                            $ids[] = $row->id;
+                        }
+                    }
+
+                    if ($ids !== []) {
+                        $deleted += DB::table($table)->whereIn('id', $ids)->delete();
+                    }
+                });
+        }
+
+        return $deleted;
+    }
 }

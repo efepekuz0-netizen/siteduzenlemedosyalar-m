@@ -1,4 +1,11 @@
 #!/bin/sh
+# ─────────────────────────────────────────────────────────────
+# BU DOSYA YALNIZCA KONTEYNER/Render ORTAMI İÇİNDİR.
+#
+# Oracle Cloud / kendi sunucu (Ubuntu) kurulumunda bu dosya kullanılmaz:
+# nginx + php-fpm + systemd servisleri (bayiinet-queue, bayiinet-schedule)
+# kullanılır. Ayrıntı: KURULUM-ORACLE.md ve deploy/oracle/install.sh
+# ─────────────────────────────────────────────────────────────
 cd /app || exit 1
 
 # Büyük XML (izin yoksa sessizce atla)
@@ -24,20 +31,39 @@ php artisan view:clear || true
 php artisan migrate --force || true
 php artisan storage:link 2>/dev/null || true
 php artisan bayiinet:ensure-admin || true
-php artisan queue:flush 2>/dev/null || true
-php artisan queue:prune-failed --hours=0 2>/dev/null || true
 
-# Masaüstü tarzı job timeout 600s → worker timeout 620, retry_after 960
+# Not: Eskiden burada `queue:flush` ve `queue:prune-failed --hours=0` vardı;
+# her yeniden başlatmada bekleyen ve başarısız işleri siliyordu (hata ayıklama
+# kaydı kayboluyordu). Artık kuyruğa dokunulmuyor.
+
+# Kuyruk işçileri: Web konteynerinde de işçi çalışır (Oracle Cloud'da systemd
+# servisleri kullanılır; ikisi birlikte çalışsa da zararsızdır).
+#
+# 1) Etkileşimli işçi: Trendyol gönderimi/doğrulaması önce gelir.
 (
   while true; do
     php artisan queue:work database \
-      --queue=marketplace,default \
+      --queue=marketplace,default,maintenance \
       --max-time=300 \
-      --timeout=620 \
-      --tries=1 \
+      --timeout=900 \
+      --tries=3 \
       --memory=512 \
       --sleep=2 || true
     sleep 2
+  done
+) &
+
+# 2) Ağır işler işçisi: XML içe aktarma ve toplu fiyat (840 sn'ye kadar sürer).
+(
+  while true; do
+    php artisan queue:work database \
+      --queue=maintenance \
+      --max-time=3600 \
+      --timeout=900 \
+      --tries=1 \
+      --memory=768 \
+      --sleep=3 || true
+    sleep 3
   done
 ) &
 

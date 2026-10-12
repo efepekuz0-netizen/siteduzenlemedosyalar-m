@@ -73,10 +73,7 @@ class SendDealerTrendyolRun implements ShouldQueue, ShouldBeUnique
 
         try {
             $query = Product::query()
-                ->where('is_active', true)
-                ->where(function ($q) {
-                    $q->where('stock', '>', 0)->orWhere('has_variants', true);
-                })
+                ->sendable()
                 ->orderBy('id');
 
             if (is_array($this->productIds) && $this->productIds !== []) {
@@ -145,7 +142,11 @@ class SendDealerTrendyolRun implements ShouldQueue, ShouldBeUnique
                         $brandId,
                         $this->attributes,
                     );
-                    $sent = (int) ($result['accepted'] ?? 0) + (int) ($result['updated'] ?? 0);
+                    // "Gönderilen" sayacına yalnız zaten Trendyol'da olup
+                    // fiyat/stoğu tazelenen kalemler yazılır; yeni iletilenler
+                    // batch doğrulaması sonucunda sayılır (aksi hâlde aynı ürün
+                    // hem "gönderildi" hem "doğrulama bekliyor" görünüyordu).
+                    $sent = (int) ($result['updated'] ?? 0);
                     $failed = (int) ($result['failed'] ?? 0);
                     $errors = array_slice((array) ($result['errors'] ?? []), 0, 8);
                     $batches = array_values((array) ($result['batches'] ?? []));

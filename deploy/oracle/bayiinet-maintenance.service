@@ -1,0 +1,54 @@
+# Bayiinet arka plan işçisi — AĞIR işler (queue:work maintenance)
+#
+# Neden ayrı bir servis?
+#   XML içe aktarma (15.000 ürün) ve toplu fiyat yeniden hesaplama işleri
+#   840 saniyeye kadar sürebiliyor. Bunlar eskiden 'default' kuyruğundaydı ve
+#   tek işçi hepsini sırayla işlediği için Trendyol gönderimi/doğrulaması
+#   dakikalarca bekliyordu ("panelde gönderim ilerlemiyor" şikâyeti).
+#   Artık ağır işler 'maintenance' kuyruğunda ve bu ayrı işçi tarafından
+#   tüketiliyor; bayiinet-queue servisi Trendyol işlerine odaklanıyor.
+#
+# Kurulum (install.sh otomatik yapar):
+#   sudo cp deploy/oracle/bayiinet-maintenance.service /etc/systemd/system/
+#   sudo sed -i 's|__APP_DIR__|/var/www/bayiinet|g; s|__USER__|www-data|g; s|__PHP__|$(command -v php8.3 || command -v php)|g' /etc/systemd/system/bayiinet-maintenance.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bayiinet-maintenance
+#
+# __PHP__ yer tutucusu: sunucudaki php çalıştırılabilir dosyası
+# (install.sh bunu otomatik doldurur: /usr/bin/php8.3 veya /usr/bin/php)
+#
+# NOT: Bu servis çalışmasa bile bayiinet-queue servisi kuyruk listesinin
+# sonunda 'maintenance'ı tükettiği için işler kaybolmaz; yalnızca daha geç
+# başlar. Yani servisi eklemek zorunlu değil, önerilir.
+
+[Unit]
+Description=Bayiinet arka plan işçisi (XML içe aktarma / toplu fiyat)
+After=network.target mysql.service mariadb.service
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=600
+
+WorkingDirectory=__APP_DIR__
+
+# --tries=1: ağır işler kendi yeniden deneme politikasını taşır
+# --max-time=7200: 2 saatte bir yenilenir (bellek şişmesine karşı)
+ExecStart=__PHP__ __APP_DIR__/artisan queue:work database \
+    --queue=maintenance \
+    --sleep=3 \
+    --tries=1 \
+    --timeout=900 \
+    --max-time=7200 \
+    --memory=768 \
+    --rest=2
+
+StandardOutput=append:__APP_DIR__/storage/logs/maintenance-worker.log
+StandardError=append:__APP_DIR__/storage/logs/maintenance-worker.log
+
+[Install]
+WantedBy=multi-user.target

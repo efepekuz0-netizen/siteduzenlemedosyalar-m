@@ -11,6 +11,7 @@ return [
     /*
      * İlk kurulumda oluşturulacak yönetici hesabı.
      * docker/start.sh -> php artisan bayiinet:ensure-admin
+     * (Oracle Cloud kurulumunda deploy/oracle/install.sh aynı komutu çağırır.)
      */
     'admin' => [
         'email' => env('ADMIN_EMAIL'),
@@ -23,6 +24,10 @@ return [
      * Kâr/komisyon ayarları veritabanındaki pazaryeri bağlantısından gelir;
      * buradaki değerler yalnızca bağlantı tanımlı değilse kullanılır.
      */
+        // /health-detail teşhis uç noktası anahtarı. Boş bırakılırsa uç nokta
+    // yalnızca sunucunun kendisinden erişilebilir olur (önerilen).
+    'health_token' => env('HEALTH_DETAIL_TOKEN', ''),
+
     'trendyol' => [
         // Tek job'un Trendyol'a gönderdiği ürün sayısı
         'batch_size' => max(1, (int) env('TRENDYOL_BATCH_SIZE', 40)),
@@ -38,6 +43,39 @@ return [
     ],
 
     /*
+     * Trendyol fiyat motoru (masaüstü pricing_engine ile aynı formül):
+     *   S = (maliyet + kargo + kâr) / (1 - komisyon), xx.99 yuvarlama
+     * Komisyon ve kâr artık ortam değişkeninden ayarlanabilir; eskiden kod
+     * içinde sabitti (%15 komisyon, 10 TL min. kâr).
+     */
+    'pricing' => [
+        // Trendyol komisyonu (%) — kategoriye göre değişir, ortalama varsayılan
+        'commission_rate' => (float) env('TRENDYOL_COMMISSION_RATE', 15),
+        // Satış başına en az kâr (TL)
+        'min_profit' => (float) env('TRENDYOL_MIN_PROFIT', 10),
+        // Yuvarlama son hanesi (0.99 → 129.99)
+        'round_to' => (float) env('TRENDYOL_ROUND_TO', 0.99),
+        // Kargo tarifesi tipi: standart | hizli
+        'delivery_type' => (string) env('TRENDYOL_DELIVERY_TYPE', 'standart'),
+        // XML'de desi yoksa kullanılacak varsayılan desi
+        'default_desi' => (float) env('TRENDYOL_DEFAULT_DESI', 5),
+    ],
+
+    /*
+     * Kuyruk davranışı.
+     *
+     * inline_drain: Render'daki "worker yoksa istek sonunda kuyruğu tüket"
+     * hilesi. Kendi sunucuda gerçek bir sistem işçisi (systemd/supervisor)
+     * çalıştığı için varsayılan KAPALI. Kapalıyken web isteği içinde
+     * `queue:work` çalıştırılmaz (istek zaman aşımını ve kilit çakışmasını
+     * önler). Yalnızca ayrı worker servisi olmayan ortamlarda açın.
+     */
+    'queue' => [
+        'inline_drain' => filter_var(env('QUEUE_INLINE_DRAIN', false), FILTER_VALIDATE_BOOLEAN),
+        'inline_drain_loops' => max(1, (int) env('QUEUE_INLINE_DRAIN_LOOPS', 3)),
+    ],
+
+    /*
      * Zamanlanmış görevler (saatlik XML yenileme / Trendyol senkronu).
      */
     'automation' => [
@@ -46,7 +84,6 @@ return [
         // Zamanlayıcının ne kadar süre içinde çalışması gerektiği (uyarı eşiği, dakika)
         'heartbeat_max_delay' => (int) env('AUTOMATION_HEARTBEAT_DELAY', 75),
     ],
-
 
     'hepsiburada' => [
         'base_url' => env('HEPSIBURADA_BASE_URL', 'https://mpop.hepsiburada.com'),
