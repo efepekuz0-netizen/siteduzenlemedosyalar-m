@@ -1,8 +1,6 @@
 <?php
 
-use App\Models\Dealer;
 use App\Services\AutomationStatus;
-use App\Services\DealerTrendyolService;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schedule;
@@ -43,40 +41,41 @@ Schedule::command('bayiinet:sync-trendyol')
     ->onFailure(fn () => AutomationStatus::record('trendyol_sync', AutomationStatus::STATUS_ERROR, 'Komut çalıştırılamadı.'));
 
 // 15 dakikada bir: Trendyol'a gönderilmiş ama sonucu henüz okunamamış batch'ler
+//
+// ÖNEMLİ: Bu iş eskiden zamanlayıcı sürecinin İÇİNDE, tüm bayiler için API
+// isteği yaparak çalışıyordu. Çok batch biriktiğinde zamanlayıcı bloke oluyor
+// (nabız gecikiyor, saatlik görevler gecikiyor) ve panel "zamanlayıcı
+// çalışmıyor" uyarısı veriyordu. Artık yalnızca tek bir sorgu yapılır ve her
+// batch için doğrulama işi KUYRUĞA atılır; işi `bayiinet-queue` işçisi yapar.
 Schedule::call(function (): void {
     AutomationStatus::heartbeat('scheduler');
 
-    $dealers = Dealer::query()
-        ->where('status', 'active')
-        ->whereNotNull('trendyol_seller_id')
-        ->get();
+    try {
+        $pending = \App\Models\DealerTrendyolListing::query()
+            ->where('status', 'sent')
+            ->whereNotNull('batch_request_id')
+            ->where('sent_at', '<', now()->subMinutes(2))
+            ->select('dealer_id', 'batch_request_id')
+            ->distinct()
+            ->limit(50)
+            ->get();
 
-    $service = app(DealerTrendyolService::class);
-    $batches = 0;
-    $errors = [];
-
-    foreach ($dealers as $dealer) {
-        if (! $dealer->hasTrendyolCredentials()) {
-            continue;
+        foreach ($pending as $row) {
+            \App\Jobs\VerifyTrendyolBatch::dispatch(
+                (int) $row->dealer_id,
+                (string) $row->batch_request_id,
+            );
         }
 
-        try {
-            $result = $service->recheckSentBatches($dealer);
-            $batches += (int) ($result['batches'] ?? 0);
-        } catch (\Throwable $e) {
-            $errors[] = $dealer->company_name.': '.$e->getMessage();
-            Log::warning('scheduled trendyol recheck', [
-                'dealer_id' => $dealer->id,
-                'error' => $e->getMessage(),
-            ]);
-        }
+        AutomationStatus::record(
+            'trendyol_recheck',
+            AutomationStatus::STATUS_OK,
+            $pending->count().' batch doğrulaması kuyruğa alındı.'
+        );
+    } catch (\Throwable $e) {
+        Log::warning('scheduled trendyol recheck', ['error' => $e->getMessage()]);
+        AutomationStatus::record('trendyol_recheck', AutomationStatus::STATUS_ERROR, mb_substr($e->getMessage(), 0, 200));
     }
-
-    AutomationStatus::record(
-        'trendyol_recheck',
-        $errors !== [] ? AutomationStatus::STATUS_WARNING : AutomationStatus::STATUS_OK,
-        $batches.' batch kontrol edildi'.($errors !== [] ? ' · '.implode(' | ', array_slice($errors, 0, 3)) : '.')
-    );
 })->everyFifteenMinutes()->name('trendyol-recheck-sent')->withoutOverlapping(10);
 
 // Kuyruk bakımı: eski başarısız iş kayıtlarını temizle
